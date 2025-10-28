@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  nextjs-app:
+    image: ${DOCKER_USER}/univalle-nextjs-docker:latest
+    container_name: univalle-nextjs-production
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      # Add your environment variables here as needed
+      # - DATABASE_URL=${DATABASE_URL}
+      # - API_KEY=${API_KEY}
+    # Uncomment if you need to persist data
+    # volumes:
+    #   - ./data:/app/data
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge

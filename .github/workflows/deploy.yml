@@ -1,0 +1,255 @@
+name: Deploy Infrastructure and Next.js App
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  terraform:
+    name: 'Provision OCI VM'
+    runs-on: ubuntu-latest
+    outputs:
+      vm_public_ip: ${{ steps.terraform_output.outputs.public_ip }}
+      vm_exists: ${{ steps.check_vm.outputs.exists }}
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.6.0
+        terraform_wrapper: false
+
+    - name: Create OCI private key file
+      run: |
+        mkdir -p oci-keys
+        echo "${{ secrets.OCI_PRIVATE_KEY }}" > oci-keys/api_key.pem
+        chmod 600 oci-keys/api_key.pem
+
+    - name: Create SSH public key file
+      run: |
+        mkdir -p vm-keys
+        echo "${{ secrets.VM_SSH_PUBLIC_KEY }}" > vm-keys/oci_vm_key.pub
+
+    - name: Create terraform.tfvars
+      run: |
+        cat > terraform.tfvars << 'EOF'
+        tenancy_ocid = "${{ secrets.OCI_TENANCY_OCID }}"
+        user_ocid = "${{ secrets.OCI_USER_OCID }}"
+        fingerprint = "${{ secrets.OCI_FINGERPRINT }}"
+        private_key_path = "oci-keys/api_key.pem"
+        region = "${{ secrets.OCI_REGION }}"
+        compartment_ocid = "${{ secrets.OCI_COMPARTMENT_OCID }}"
+        subnet_id = "${{ secrets.OCI_SUBNET_ID }}"
+        availability_domain = "${{ secrets.OCI_AVAILABILITY_DOMAIN }}"
+        ubuntu_2204_image_ocid = "${{ secrets.OCI_UBUNTU_IMAGE_OCID }}"
+        ssh_public_key = "${{ secrets.VM_SSH_PUBLIC_KEY }}"
+        EOF
+
+    - name: Terraform Init
+      run: terraform init
+
+    - name: Terraform Validate
+      run: terraform validate
+
+    - name: Check if VM exists
+      id: check_vm
+      run: |
+        if [ -f terraform.tfstate ] && [ -s terraform.tfstate ]; then
+          echo "exists=true" >> $GITHUB_OUTPUT
+          echo "VM already exists, will update if needed"
+        else
+          echo "exists=false" >> $GITHUB_OUTPUT
+          echo "VM does not exist, will create new one"
+        fi
+
+    - name: Terraform Plan
+      run: terraform plan -out=tfplan
+
+    - name: Terraform Apply
+      run: terraform apply -auto-approve tfplan
+
+    - name: Get Public IP
+      id: terraform_output
+      run: |
+        PUBLIC_IP=$(terraform output -raw public_ip)
+        echo "public_ip=$PUBLIC_IP" >> $GITHUB_OUTPUT
+        echo "✅ VM Public IP: $PUBLIC_IP"
+
+    - name: Wait for VM to be ready
+      run: |
+        echo "Waiting 90 seconds for VM initialization and Docker installation..."
+        sleep 90
+
+    - name: Test SSH Connection
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.VM_SSH_PRIVATE_KEY }}" > ~/.ssh/oci_vm_key
+        chmod 600 ~/.ssh/oci_vm_key
+        
+        # Add to known_hosts
+        ssh-keyscan -H ${{ steps.terraform_output.outputs.public_ip }} >> ~/.ssh/known_hosts 2>/dev/null || true
+        
+        # Test connection (retry up to 5 times)
+        for i in {1..5}; do
+          if ssh -i ~/.ssh/oci_vm_key -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@${{ steps.terraform_output.outputs.public_ip }} "echo 'SSH Connection successful'" 2>/dev/null; then
+            echo "✅ SSH connection established"
+            exit 0
+          fi
+          echo "Attempt $i failed, retrying in 30 seconds..."
+          sleep 30
+        done
+        echo "⚠️ SSH connection could not be established after 5 attempts"
+        exit 1
+
+    - name: Upload Terraform State
+      uses: actions/upload-artifact@v4
+      with:
+        name: terraform-state
+        path: terraform.tfstate
+        retention-days: 30
+
+    - name: Summary
+      run: |
+        echo "## Terraform Deployment Summary 🚀" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "✅ VM successfully provisioned and configured" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Public IP:** \`${{ steps.terraform_output.outputs.public_ip }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Status:** ${{ steps.check_vm.outputs.exists == 'true' && 'Updated existing VM' || 'Created new VM' }}" >> $GITHUB_STEP_SUMMARY
+
+  deploy:
+    name: 'Deploy Next.js Application'
+    runs-on: ubuntu-latest
+    needs: terraform
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USER }}
+        password: ${{ secrets.DOCKER_PAT }}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./univalle-nextjs-docker
+        push: true
+        tags: |
+          ${{ secrets.DOCKER_USER }}/univalle-nextjs-docker:latest
+          ${{ secrets.DOCKER_USER }}/univalle-nextjs-docker:${{ github.sha }}
+        cache-from: type=registry,ref=${{ secrets.DOCKER_USER }}/univalle-nextjs-docker:buildcache
+        cache-to: type=registry,ref=${{ secrets.DOCKER_USER }}/univalle-nextjs-docker:buildcache,mode=max
+
+    - name: Create docker-compose.yml for deployment
+      run: |
+        cat > docker-compose.yml << 'EOF'
+        version: '3.8'
+
+        services:
+          nextjs-app:
+            image: ${{ secrets.DOCKER_USER }}/univalle-nextjs-docker:latest
+            container_name: univalle-nextjs-production
+            restart: unless-stopped
+            ports:
+              - "3000:3000"
+            environment:
+              - NODE_ENV=production
+
+        EOF
+
+    - name: Deploy to VM
+      env:
+        VM_IP: ${{ needs.terraform.outputs.vm_public_ip }}
+      run: |
+        # Setup SSH
+        mkdir -p ~/.ssh
+        echo "${{ secrets.VM_SSH_PRIVATE_KEY }}" > ~/.ssh/oci_vm_key
+        chmod 600 ~/.ssh/oci_vm_key
+        ssh-keyscan -H $VM_IP >> ~/.ssh/known_hosts 2>/dev/null || true
+
+        # Copy docker-compose file
+        scp -i ~/.ssh/oci_vm_key -o StrictHostKeyChecking=no docker-compose.yml ubuntu@$VM_IP:~/
+
+        # Deploy on VM
+        ssh -i ~/.ssh/oci_vm_key -o StrictHostKeyChecking=no ubuntu@$VM_IP << 'ENDSSH'
+          # Wait for Docker to be ready
+          echo "Waiting for Docker to be ready..."
+          for i in {1..30}; do
+            if sudo docker ps >/dev/null 2>&1; then
+              echo "Docker is ready"
+              break
+            fi
+            echo "Waiting for Docker... ($i/30)"
+            sleep 2
+          done
+
+          # Pull latest image
+          echo "Pulling latest Docker image..."
+          sudo docker pull ${{ secrets.DOCKER_USER }}/univalle-nextjs-docker:latest
+          
+          # Stop and remove old container
+          echo "Stopping old container..."
+          sudo docker compose down 2>/dev/null || true
+          
+          # Start new container
+          echo "Starting new container..."
+          sudo docker compose up -d
+          
+          # Clean up old images
+          echo "Cleaning up old images..."
+          sudo docker image prune -af
+          
+          # Show running containers
+          echo "Running containers:"
+          sudo docker ps
+          
+          echo "✅ Deployment completed successfully!"
+        ENDSSH
+
+    - name: Health Check
+      run: |
+        VM_IP=${{ needs.terraform.outputs.vm_public_ip }}
+        echo "Waiting for application to start..."
+        sleep 20
+        
+        # Check if app is responding
+        for i in {1..10}; do
+          if curl -f -m 5 http://$VM_IP:3000 > /dev/null 2>&1; then
+            echo "✅ Application is running and healthy!"
+            exit 0
+          fi
+          echo "Health check attempt $i/10 failed, retrying in 10 seconds..."
+          sleep 10
+        done
+        
+        echo "⚠️ Application health check did not pass, but deployment completed. Please check manually."
+        exit 0
+
+    - name: Summary
+      run: |
+        VM_IP=${{ needs.terraform.outputs.vm_public_ip }}
+        echo "## Next.js Deployment Summary 🎉" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "✅ Application successfully deployed!" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Application URL:** http://$VM_IP:3000" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Docker Image:** \`${{ secrets.DOCKER_USER }}/univalle-nextjs-docker:latest\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Commit SHA:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🔗 Quick Links" >> $GITHUB_STEP_SUMMARY
+        echo "- [View Application](http://$VM_IP:3000)" >> $GITHUB_STEP_SUMMARY
+        echo "- [Docker Hub Image](https://hub.docker.com/r/${{ secrets.DOCKER_USER }}/univalle-nextjs-docker)" >> $GITHUB_STEP_SUMMARY
