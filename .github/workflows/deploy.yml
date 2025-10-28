@@ -27,8 +27,10 @@ jobs:
     - name: Create OCI private key file
       run: |
         mkdir -p oci-keys
-        echo "${{ secrets.OCI_PRIVATE_KEY }}" > oci-keys/api_key.pem
+        printf "%s\n" "$OCI_PRIVATE_KEY" > oci-keys/api_key.pem
         chmod 600 oci-keys/api_key.pem
+      env:
+        OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
 
     - name: Create SSH public key file
       run: |
@@ -88,7 +90,7 @@ jobs:
     - name: Test SSH Connection
       run: |
         mkdir -p ~/.ssh
-        echo "${{ secrets.VM_SSH_PRIVATE_KEY }}" > ~/.ssh/oci_vm_key
+        printf "%s\n" "$VM_SSH_PRIVATE_KEY" > ~/.ssh/oci_vm_key
         chmod 600 ~/.ssh/oci_vm_key
         
         # Add to known_hosts
@@ -105,6 +107,8 @@ jobs:
         done
         echo "⚠️ SSH connection could not be established after 5 attempts"
         exit 1
+      env:
+        VM_SSH_PRIVATE_KEY: ${{ secrets.VM_SSH_PRIVATE_KEY }}
 
     - name: Upload Terraform State
       uses: actions/upload-artifact@v4
@@ -172,10 +176,12 @@ jobs:
     - name: Deploy to VM
       env:
         VM_IP: ${{ needs.terraform.outputs.vm_public_ip }}
+        VM_SSH_PRIVATE_KEY: ${{ secrets.VM_SSH_PRIVATE_KEY }}
+        DOCKER_USER: ${{ secrets.DOCKER_USER }}
       run: |
         # Setup SSH
         mkdir -p ~/.ssh
-        echo "${{ secrets.VM_SSH_PRIVATE_KEY }}" > ~/.ssh/oci_vm_key
+        printf "%s\n" "$VM_SSH_PRIVATE_KEY" > ~/.ssh/oci_vm_key
         chmod 600 ~/.ssh/oci_vm_key
         ssh-keyscan -H $VM_IP >> ~/.ssh/known_hosts 2>/dev/null || true
 
@@ -183,7 +189,7 @@ jobs:
         scp -i ~/.ssh/oci_vm_key -o StrictHostKeyChecking=no docker-compose.yml ubuntu@$VM_IP:~/
 
         # Deploy on VM
-        ssh -i ~/.ssh/oci_vm_key -o StrictHostKeyChecking=no ubuntu@$VM_IP << 'ENDSSH'
+        ssh -i ~/.ssh/oci_vm_key -o StrictHostKeyChecking=no ubuntu@$VM_IP << ENDSSH
           # Wait for Docker to be ready
           echo "Waiting for Docker to be ready..."
           for i in {1..30}; do
@@ -191,13 +197,13 @@ jobs:
               echo "Docker is ready"
               break
             fi
-            echo "Waiting for Docker... ($i/30)"
+            echo "Waiting for Docker... (\$i/30)"
             sleep 2
           done
 
           # Pull latest image
           echo "Pulling latest Docker image..."
-          sudo docker pull ${{ secrets.DOCKER_USER }}/univalle-nextjs-docker:latest
+          sudo docker pull $DOCKER_USER/univalle-nextjs-docker:latest
           
           # Stop and remove old container
           echo "Stopping old container..."
