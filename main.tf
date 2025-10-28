@@ -22,7 +22,7 @@ resource "oci_core_instance" "Ubuntu_vm" {
     subnet_id = var.subnet_id
     assign_public_ip = true
     display_name = "ubuntu-docker-vm-vnic"
-    hostname_label = "ubuntu-docker-vm"
+    # hostname_label removed to avoid conflicts on redeployment
   }
 
   metadata = {
