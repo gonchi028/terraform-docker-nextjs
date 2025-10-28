@@ -167,7 +167,7 @@ jobs:
             container_name: univalle-nextjs-production
             restart: unless-stopped
             ports:
-              - "3000:3000"
+              - "8080:3000"
             environment:
               - NODE_ENV=production
 
@@ -232,7 +232,7 @@ jobs:
         
         # Check if app is responding
         for i in {1..10}; do
-          if curl -f -m 5 http://$VM_IP:3000 > /dev/null 2>&1; then
+          if curl -f -m 5 http://$VM_IP:8080 > /dev/null 2>&1; then
             echo "✅ Application is running and healthy!"
             exit 0
           fi
@@ -250,12 +250,12 @@ jobs:
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "✅ Application successfully deployed!" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Application URL:** http://$VM_IP:3000" >> $GITHUB_STEP_SUMMARY
+        echo "**Application URL:** http://$VM_IP:8080" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Docker Image:** \`${{ secrets.DOCKER_USER }}/univalle-nextjs-docker:latest\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Commit SHA:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 🔗 Quick Links" >> $GITHUB_STEP_SUMMARY
-        echo "- [View Application](http://$VM_IP:3000)" >> $GITHUB_STEP_SUMMARY
+        echo "- [View Application](http://$VM_IP:8080)" >> $GITHUB_STEP_SUMMARY
         echo "- [Docker Hub Image](https://hub.docker.com/r/${{ secrets.DOCKER_USER }}/univalle-nextjs-docker)" >> $GITHUB_STEP_SUMMARY
